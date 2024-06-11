@@ -1,7 +1,7 @@
 from app.services.common_imports import *
 from app.services import extrafunctions as extfun
 api_key = "78K1C9N5E01K7XLV"
-
+#### test
 #### global variables
 lst_all_sectors = ["Technology","Financial Services","Healthcare","Consumer Cyclical","Basic Materials",
                    "Industrials", "Communication Services", "Consumer Defensive", "Utilities", "Real Estate", "Energy"]
@@ -34,7 +34,6 @@ class PortfolioConstruction:
     self.endDate = None
 
   def add_equity_tickers(self, tickers, tickers_config ={}):
-
     for ticker in tickers:
       ticker_config = tickers_config.get(ticker,{})
       ticker_data = get_basic_ticker_data(ticker,ticker_config)
