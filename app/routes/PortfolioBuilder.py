@@ -14,7 +14,8 @@ from io import StringIO, BytesIO
 model = PortfolioConstruction()
 
 
-class inputTickersConfigs(BaseModel):
+class inputTickersSetupConfigs(BaseModel):
+    tickerstoUse: list
     tickers_configs: Dict
 
 
@@ -25,7 +26,7 @@ class inputTickers(BaseModel):
     ticker_configs: Dict ##### {stocks: {s1: {min:0.2, max:0.3}, s2: {min:0.3, max:0.7} }, ETFs: {e1: {min:0.3}, }}
 
 
-class moreModelParams(BaseModel):
+class moreModelConstraints(BaseModel):
     sector_limits : Dict
 
 
@@ -55,17 +56,19 @@ async def upload_price_datasets(file: UploadFile = File(...)):
 
 
 @router.post("/update-tickers-configs")
-async def updateTickersConfigs(inputTickersConfigs:inputTickersConfigs):
-    tickers_configs = inputTickersConfigs.tickers_configs
+async def updateTickersConfigs(inputTickersSetupConfigs:inputTickersSetupConfigs):
+    tickers_configs = inputTickersSetupConfigs.tickers_configs
+    model.select_tickers_to_use(inputTickersSetupConfigs.tickerstoUse)
     model.add_or_update_tickers_configs(tickers_configs)
 
 
 
 
+
 @router.post("/MVOptimization") 
-async def MVOpt(optimize_for, moreModelParams:moreModelParams, min_return:float = None, max_risk:float = None, short_sell:bool = False,
+async def MVOpt(optimize_for, moreModelConstraints:moreModelConstraints, min_return:float = None, max_risk:float = None, short_sell:bool = False,
                 hist_decay:float = None):
-    portfolio_sector_exposures_limits = moreModelParams.sector_limits
+    portfolio_sector_exposures_limits = moreModelConstraints.sector_limits
     print(portfolio_sector_exposures_limits)
     optimized_port = model.MVO(optimize_for=optimize_for, min_return=min_return,
               max_risk=max_risk, hist_decay=hist_decay, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits)
@@ -75,9 +78,9 @@ async def MVOpt(optimize_for, moreModelParams:moreModelParams, min_return:float 
 
 
 @router.post("/ratioOpt") 
-async def ratioOpt(optimize_ratio, moreModelParams:moreModelParams,
+async def ratioOpt(optimize_ratio, moreModelConstraints:moreModelConstraints,
                 hist_decay:float = None):
-    portfolio_sector_exposures_limits = moreModelParams.sector_limits
+    portfolio_sector_exposures_limits = moreModelConstraints.sector_limits
     print(portfolio_sector_exposures_limits)
     optimized_port = model.optimize_ratio(ratio=optimize_ratio,  hist_decay=hist_decay,
                                 portfolio_sector_exposures_limits =portfolio_sector_exposures_limits)
@@ -85,9 +88,13 @@ async def ratioOpt(optimize_ratio, moreModelParams:moreModelParams,
     return optimized_port
 
 
+@router.post("/min_CVaR")
+async def min_CVaR(min_return:float, beta:float, moreModelConstraints:moreModelConstraints):
+    portfolio_sector_exposures_limits = moreModelConstraints.sector_limits
+    print(portfolio_sector_exposures_limits)
+    optimized_port = model.min_CVaR(target_return=min_return, beta=beta, portfolio_sector_exposures_limits= portfolio_sector_exposures_limits)
 
-
-
+    return optimized_port
 
 
 @router.get("/test")

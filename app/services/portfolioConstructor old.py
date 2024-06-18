@@ -1,30 +1,29 @@
 from app.services.common_imports import *
 from app.services import extrafunctions as extfun
-
+api_key = "78K1C9N5E01K7XLV"
+#### test
 #### global variables
 lst_all_sectors = ["Technology","Financial Services","Healthcare","Consumer Cyclical","Basic Materials",
                    "Industrials", "Communication Services", "Consumer Defensive", "Utilities", "Real Estate", "Energy"]
 
+##### some configgs
 
-#-------- configgs ------- #
-data_frequency ="d"  #### should be changebale from the app -- can be M (for monthly) or D
+###only daily supported for now
+data_frequency = "d"  #### should be changebale from the app -- can be M (for monthly) or D
 
 data_frequency = data_frequency.lower()
-if data_frequency not in ["d", "m"]: data_frequency = "d"
+if data_frequency not in ["d", "m","w"]: data_frequency = "d"
 
-frequency_scaler = 252 if data_frequency=="d" else 12
-print(frequency_scaler)
+x = {"d":252, "w":52, "m":12}
 
-
-#-------- get fama french data ----------#
+frequency_scaler = x[data_frequency]
 
 risk_free_data, ff_factors = extfun.get_ff_data()
 
 
 
 
-
-#----------- class -------------
+### class
 class PortfolioConstruction:
 
   def __init__(self):
@@ -34,25 +33,70 @@ class PortfolioConstruction:
     self.startDate = None
     self.endDate = None
 
-  def add_equity_tickers(self, tickers, ticker_limits ={}):
-
+  def add_equity_tickers(self, tickers, tickers_config ={}):
     for ticker in tickers:
-      ticker_limit = ticker_limits.get(ticker,{})
-      ticker_data = get_basic_ticker_data(ticker,ticker_limit)
-      ticker_data["info"]= get_ticker_info(ticker)
+      ticker_config = tickers_config.get(ticker,{})
+      ticker_data = get_basic_ticker_data(ticker,ticker_config)
+      ticker_data= ticker_data | get_ticker_info(ticker)
+      if "sector" in ticker_config and ticker_config.get("sector", "") not in [None,""]:
+        ticker_data["sector"] = ticker_config["sector"]
       self.all_equity_data[ticker] = ticker_data
 
-  def add_etf_tickers(self, tickers, ticker_limits ={}):
+    self.get_sector_weights()
+
+  def add_tickers_using_dataset(self, price_data, tickers_to_use=None):
+
+    if tickers_to_use is not None:
+      tickers_to_use = [i for i in tickers_to_use if i in price_data.columns.tolist()] + ["Date"]
+      price_data = price_data[tickers_to_use]
+    
+    price_data.set_index("Date", inplace = True)
+    tickers = price_data.columns.tolist()
+
+    price_data.index = pd.to_datetime(price_data.index)
+    price_data = price_data.resample(data_frequency).last().astype(float)
+
+    price_data.index = price_data.index.strftime('%Y-%m-%d')
     for ticker in tickers:
-      ticker_limit = ticker_limits.get(ticker,{})
-      ticker_data = get_basic_ticker_data(ticker,ticker_limit)
-      ticker_data["info"]= get_etf_info(ticker)
+      #price_data[ticker] = price_data[ticker].resample(data_frequency).last().astype(float)
+      self.all_equity_data[ticker] = {"price_data":price_data[ticker], "sector":"No Sector Data"}
+
+
+    self.get_sector_weights()
+  
+  def add_or_update_tickers_configs(self, tickers_config):
+
+    for ticker in self.all_equity_data:
+      print(ticker)
+      ticker_config = tickers_config.get(ticker,None)
+      print(ticker_config)
+      if ticker_config is None: continue
+      else:
+        for config in ticker_config:
+          config_val = ticker_config[config]
+          if config_val is not None: self.all_equity_data[ticker][config] = config_val
+
+    self.get_sector_weights()
+
+
+
+  def add_etf_tickers(self, tickers, ticker_config ={}):
+    for ticker in tickers:
+      ticker_limit = ticker_config.get(ticker,{})
+      ticker_data = get_basic_ticker_data(ticker,ticker_config)
+      ticker_data =ticker_data |  get_etf_info(ticker)
       self.all_equity_data[ticker] = ticker_data
 
   def set_model_period(self, startDate=None, endDate=None):
     self.startDate = startDate
     self.endDate = endDate
 
+
+  def get_sector_weights(self):
+    allsectors = [info['sector'] for info in self.all_equity_data.values() if 'sector' in info]
+    allsectors = list(set(allsectors))
+    for ticker in self.all_equity_data:
+      self.all_equity_data[ticker]["sector_weights"] = pd.Series({sector: 1 if sector == self.all_equity_data[ticker]["sector"] else 0 for sector in allsectors}, name = ticker)
 
 
   def MVO(self,optimize_for, hist_decay, max_risk = None, min_return = None, portfolio_sector_exposures_limits = None):
@@ -126,7 +170,7 @@ class PortfolioConstruction:
 
     #### find min possible risk
     min_risk_objective = cp.Minimize(portfolio_variance)
-    constraints = create_constraints( weights, variance= portfolio_variance, expected_return = expected_return, strict_bound = True, portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits  )
+    constraints = create_constraints( weights, variance= portfolio_variance, expected_return = expected_return, ticker_limits = all_ticker_limits, strict_bound = True, portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits  )
     problem = cp.Problem(min_risk_objective, constraints)
     problem.solve()
     if portfolio_variance.value is None:
@@ -143,7 +187,7 @@ class PortfolioConstruction:
     print(max_possible_return)
     #2. find min variance to get that max possible return
     min_risk_objective = cp.Minimize(portfolio_variance)
-    constraints = create_constraints( weights, min_return = max_possible_return, variance= portfolio_variance, expected_return = expected_return, strict_bound = True, portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits  )
+    constraints = create_constraints( weights, min_return = max_possible_return, ticker_limits = all_ticker_limits, variance= portfolio_variance, expected_return = expected_return, strict_bound = True, portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits  )
 
     problem = cp.Problem(min_risk_objective, constraints)
     problem.solve()
@@ -284,7 +328,7 @@ def calculate_portfolio_metrics(weights,expected_returns, covar, std_vector, all
 
   ### sector exposures dict 
 
-  sector_exposures_df = pd.concat([all_data[ticker]["info"]["sector_weights"] for ticker in all_data], axis =1)
+  sector_exposures_df = pd.concat([all_data[ticker]["sector_weights"] for ticker in all_data], axis =1)
   sector_exposures = {sec: round(np.matmul( sector_exposures_df.loc[sec].values , weights),3) for sec in sector_exposures_df.index.tolist()}
   portfolio_metrics["sector_exposures"] = sector_exposures
 
@@ -358,7 +402,7 @@ def cov_corr_calculator(df, alpha):
   for ticker_x in tickers_lst:
     for ticker_y in tickers_lst:
       x_y_valid_returns = temp_retuns[list(set([ticker_x, ticker_y]))].dropna(axis = 0, how = "any")
-      covar.loc[ticker_x,ticker_y] = x_y_valid_returns[ticker_x].ewm(alpha =alpha).cov(x_y_valid_returns[ticker_y]).iloc[-1] *252
+      covar.loc[ticker_x,ticker_y] = x_y_valid_returns[ticker_x].ewm(alpha =alpha).cov(x_y_valid_returns[ticker_y]).iloc[-1] *frequency_scaler
       corr.loc[ticker_x,ticker_y] = x_y_valid_returns[ticker_x].ewm(alpha =alpha).corr(x_y_valid_returns[ticker_y]).iloc[-1]
   return covar, corr
 
@@ -366,10 +410,11 @@ def cov_corr_calculator(df, alpha):
 def get_EWMA_std_return_cov(all_data, factor_model = False, alpha = None, startDate = None, endDate = None):
 
   all_prices = pd.concat([all_data[ticker]["price_data"] for ticker in all_data], axis = 1)
-  tickers_lst =all_prices.columns.tolist()
+  tickers_lst = all_prices.columns.tolist()
 
   if startDate is not None:all_prices = all_prices[all_prices.index>= startDate]
   if endDate is not None:all_prices = all_prices[all_prices.index<= endDate]
+
 
   all_returns = all_prices.pct_change().dropna(axis = 0, how = "all")
 
@@ -386,9 +431,9 @@ def get_EWMA_std_return_cov(all_data, factor_model = False, alpha = None, startD
   if alpha is None: alpha =0.000000000000001
   expw_returns = all_returns.ewm(alpha =alpha)
   excess_returns = df_excess_ret.drop(columns="RF").ewm(alpha =alpha)
-  excess_return_vector = excess_returns.mean().iloc[-1].transpose() *252
-  expected_return_vector = expw_returns.mean().iloc[-1].transpose() *252
-  std_vector = expw_returns.std().iloc[-1].transpose() *np.sqrt(252)
+  excess_return_vector = excess_returns.mean().iloc[-1].transpose() *frequency_scaler
+  expected_return_vector = expw_returns.mean().iloc[-1].transpose() *frequency_scaler
+  std_vector = expw_returns.std().iloc[-1].transpose() *np.sqrt(frequency_scaler)
 
   covar, corr = cov_corr_calculator(all_returns, alpha)
 
@@ -409,24 +454,42 @@ def calculate_portfolio_diversification_ratio(weights, covar_df):
 
 
 def calculate_portfolio_sector_exposure(weights, all_data):
-    sector_exposures_df = pd.concat([all_data[ticker]["info"]["sector_weights"] for ticker in all_data], axis =1)
+    sector_exposures_df = pd.concat([all_data[ticker]["sector_weights"] for ticker in all_data], axis =1)
     portfolio_sector_exposures_dict = {sec: cp.matmul( sector_exposures_df.loc[sec].values , weights) for sec in sector_exposures_df.index.tolist()}
     return portfolio_sector_exposures_dict
 
 
-def get_basic_ticker_data(ticker, limits):
+
+def download_stock_historical_price(ticker):
+    url = f'https://www.alphavantage.co/query?function=TIME_SERIES_WEEKLY_ADJUSTED&symbol={ticker}&outputsize=full&apikey={api_key}'
+    r = requests.get(url)
+    data = r.json()
+    print(data)
+    price_data = pd.DataFrame(data["Weekly Adjusted Time Series"]).loc[["5. adjusted close"]].T
+    price_data.rename(columns={"5. adjusted close": ticker}, inplace=True)
+    price_data.index = pd.to_datetime(price_data.index)
+    price_data[ticker] = price_data[ticker].resample(data_frequency).last().astype(float)
+    price_data = price_data.iloc[::-1]
+
+    return price_data.dropna()
+
+
+
+def get_basic_ticker_data(ticker, ticker_config, source_test = "yahoo"):
 
     current_date = datetime.datetime.now()
     start_date = current_date - datetime.timedelta(days=30 * 365)  
 
     ticker_data = {}
-    price_data = yf.download(ticker, start=start_date, end=current_date)["Adj Close"].resample(data_frequency).last().rename(ticker).dropna()
-    price_data.index = price_data.index.strftime('%Y-%m-%d')
+    if source_test == "yahoo":
+      price_data = yf.download(ticker, start=start_date, end=current_date)["Adj Close"].resample(data_frequency).last().rename(ticker).dropna()
+      price_data.index = price_data.index.strftime('%Y-%m-%d')
+    else:price_data = download_stock_historical_price(ticker)
 
     ticker_data["price_data"] = price_data
 
-    ticker_data["max"] = limits.get("max",None)
-    ticker_data["min"] = limits.get("min",None)
+    ticker_data["max"] = ticker_config.get("max",None)
+    ticker_data["min"] = ticker_config.get("min",None)
 
     return ticker_data
 
@@ -445,7 +508,7 @@ def get_etf_info(ticker):
 
 
 def get_clean_ticker_bounds_dict(all_equity_data):
-  all_ticker_limits = {outer_k: {k: v for k, v in outer_v.items() if k in ['Max', 'Min']} for outer_k, outer_v in all_equity_data.items()}
+  all_ticker_limits = {outer_k: {k: v for k, v in outer_v.items() if k in ['max', 'min']} for outer_k, outer_v in all_equity_data.items()}
   return all_ticker_limits
 
 
@@ -453,11 +516,19 @@ def get_clean_ticker_bounds_dict(all_equity_data):
 def filter_dict(original_dict, keys):
     return {key: original_dict[key] for key in keys if key in original_dict}
 
-def get_ticker_info(ticker):
-  relevant_info = ["quoteType", "country","marketCap", "currency","longName", "sector", "Ask", "Bid"]
-  yf_ticker = yf.Ticker(ticker)
-  info = yf_ticker.info
-  info = filter_dict(info, relevant_info)
-  if "sector" in info:
-    info["sector_weights"] = pd.Series({sector: 1 if sector == info["sector"] else 0 for sector in lst_all_sectors}, name = ticker)
-  return info
+def get_ticker_info(ticker, test_source = "yahoo"):
+
+    if test_source =="yahoo":
+      relevant_info = ["quoteType", "country","marketCap", "currency","longName", "sector", "Ask", "Bid"]
+      yf_ticker = yf.Ticker(ticker)
+      info = yf_ticker.info
+      info = filter_dict(info, relevant_info)
+    
+    else:
+      relevant_info = ["MarketCapitalization", "Sector", "Country", "Currency"]
+      url = f'https://www.alphavantage.co/query?function=OVERVIEW&symbol={ticker}&apikey={api_key}'
+      r = requests.get(url)
+      info = r.json()
+      print(info)
+      info = filter_dict(info, relevant_info)
+    return info

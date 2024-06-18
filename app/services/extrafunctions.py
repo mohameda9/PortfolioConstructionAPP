@@ -15,8 +15,7 @@ def get_ff_data():
     risk_free_data = ff_factors[["RF"]].apply(lambda x: round((1+x)**(1/365)-1,8)) #### might need to update to t-1 logic
 
 
-    risk_free_data = ff_factors[["RF"]].apply(lambda x: round((1+x)**(1/365)-1,8)) #### might need to update to t-1 logic
-    ff_factors.drop(columns = ["Mkt-RF","RF"] , inplace = True)
+    ff_factors.drop(columns = ["RF"] , inplace = True)
     ff_factors/=100
 
     risk_free_data

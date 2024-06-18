@@ -9,12 +9,12 @@ exampleInput_toPOST_ADD_DATA = {
                     "ETFs":{"XLK":{"min":0.2, "max":0.6}}}
 }
 
-exampleInputTickerconfigs = {
+exampleinputTickersSetupConfigs = {
+  "tickerstoUse": ["AAPL", "WMT", "IBM"],
   "tickers_configs": {"AAPL":{"min":0.1, "max":0.3, "sector":"Technology"}}
 } 
 
 
-
-moreModelParams_example = {
+moreModelConstraints_example = {
     "sector_configs": {"Technology":{"max":0.5}}
 }

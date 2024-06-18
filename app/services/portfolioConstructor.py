@@ -20,10 +20,16 @@ frequency_scaler = x[data_frequency]
 
 risk_free_data, ff_factors = extfun.get_ff_data()
 
+factors_dict = {"style":{}}
+for factor in ff_factors.columns:
+  factors_dict["style"][factor] = {"return_data": ff_factors[factor]}
 
+all_factor_returns = pd.concat([i["return_data"] for j,i in  factors_dict["style"].items()], axis =1).dropna()
+all_factor_returns
 
+default_alpha = 0.000000000000001
 
-### class
+#------------------------------ Class Construction Begins -----------------------------------
 class PortfolioConstruction:
 
   def __init__(self):
@@ -33,7 +39,12 @@ class PortfolioConstruction:
     self.startDate = None
     self.endDate = None
 
+
+#------------------------------------ functions to add and define tickers #------------------------------------
+
+
   def add_equity_tickers(self, tickers, tickers_config ={}):
+
     for ticker in tickers:
       ticker_config = tickers_config.get(ticker,{})
       ticker_data = get_basic_ticker_data(ticker,ticker_config)
@@ -44,12 +55,8 @@ class PortfolioConstruction:
 
     self.get_sector_weights()
 
-  def add_tickers_using_dataset(self, price_data, tickers_to_use=None):
+  def add_tickers_using_dataset(self, price_data):
 
-    if tickers_to_use is not None:
-      tickers_to_use = [i for i in tickers_to_use if i in price_data.columns.tolist()] + ["Date"]
-      price_data = price_data[tickers_to_use]
-    
     price_data.set_index("Date", inplace = True)
     tickers = price_data.columns.tolist()
 
@@ -59,17 +66,26 @@ class PortfolioConstruction:
     price_data.index = price_data.index.strftime('%Y-%m-%d')
     for ticker in tickers:
       #price_data[ticker] = price_data[ticker].resample(data_frequency).last().astype(float)
-      self.all_equity_data[ticker] = {"price_data":price_data[ticker], "sector":"No Sector Data"}
+      self.all_equity_data[ticker] = {"price_data":price_data[ticker], "sector":"No Sector Data", "include":True}
 
 
     self.get_sector_weights()
-  
+
+  def select_tickers_to_use(self, tickers_to_use):
+
+    for ticker in tickers_to_use:
+      self.all_equity_data[ticker]["include"] = True
+
+    for ticker in self.all_equity_data:
+      if ticker not in tickers_to_use:
+        self.all_equity_data[ticker]["include"] = False
+
+
+
   def add_or_update_tickers_configs(self, tickers_config):
 
     for ticker in self.all_equity_data:
-      print(ticker)
       ticker_config = tickers_config.get(ticker,None)
-      print(ticker_config)
       if ticker_config is None: continue
       else:
         for config in ticker_config:
@@ -87,6 +103,8 @@ class PortfolioConstruction:
       ticker_data =ticker_data |  get_etf_info(ticker)
       self.all_equity_data[ticker] = ticker_data
 
+
+
   def set_model_period(self, startDate=None, endDate=None):
     self.startDate = startDate
     self.endDate = endDate
@@ -99,9 +117,16 @@ class PortfolioConstruction:
       self.all_equity_data[ticker]["sector_weights"] = pd.Series({sector: 1 if sector == self.all_equity_data[ticker]["sector"] else 0 for sector in allsectors}, name = ticker)
 
 
-  def MVO(self,optimize_for, hist_decay, max_risk = None, min_return = None, portfolio_sector_exposures_limits = None):
+#------------------------------------ End of Ticker and Data setup #------------------------------------
+
+
+
+#------------------------------------ MeanVariance Optimization #------------------------------------
+
+  def MVO(self,optimize_for, hist_decay, max_risk = None, min_return = None, max_leverage =0, short_sell = False, portfolio_sector_exposures_limits = None, portfolio_factor_exposures_limits = None):
 
     all_data = self.all_equity_data | self.all_etf_data
+    all_data = get_all_data_dict_for_usable_tickers(all_data)
 
     optimize_for = optimize_for.lower()
     allowed_optimize_for = ["risk", "return"]
@@ -117,15 +142,18 @@ class PortfolioConstruction:
 
     all_ticker_limits = get_clean_ticker_bounds_dict(all_data)
 
-    expected_return_vector,std_vector,covar_df, excess_return_vector = get_EWMA_std_return_cov(all_data, alpha = hist_decay, startDate = self.startDate, endDate = self.endDate)
+    expected_return_vector,std_vector,covar_df, excess_return_vector, expected_rf_rate, one_year_return_df = get_EWMA_std_return_cov(all_data, alpha = hist_decay, startDate = self.startDate, endDate = self.endDate)
     weights = cp.Variable(len(expected_return_vector))
 
+    leverage_amt = cp.Variable(1)
+    factor_loadings = factor_model(all_data, all_factor_returns, alpha = hist_decay)
 
-    portfolio_sector_exposures_dict = calculate_portfolio_sector_exposure(weights, all_data)
 
-    expected_return = calculate_portfolio_expected_return(weights, expected_return_vector)
-    portfolio_variance = calculate_portfolio_variance(weights, covar_df)
-    diversification_ratio = calculate_portfolio_diversification_ratio(weights, covar_df)
+    expected_return, portfolio_variance, excess_return, \
+    diversification_ratio, portfolio_sector_exposures_dict, \
+    portfolio_factor_exposure_dict = calculate_all(all_data, weights, expected_return_vector, excess_return_vector,covar_df, 
+                                                   factor_loadings,leverage_amt = leverage_amt, expected_rf_rate = expected_rf_rate )
+
 
     if optimize_for == "return" : objective = cp.Maximize(expected_return)
     elif optimize_for == "risk": objective = cp.Minimize(portfolio_variance)
@@ -133,7 +161,10 @@ class PortfolioConstruction:
 
     max_variance = None if max_risk is None else max_risk **2
 
-    constraints = create_constraints(weights,ticker_limits = all_ticker_limits, variance= portfolio_variance, expected_return = expected_return, min_return = min_return, max_variance =  max_variance, portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits  )
+    constraints = create_constraints(weights,ticker_limits = all_ticker_limits, variance= portfolio_variance, expected_return = expected_return, short_sell_allowed= short_sell,
+                                     min_return = min_return, max_variance =  max_variance, portfolio_sector_exposures_dict = portfolio_sector_exposures_dict,
+                                     portfolio_sector_exposures_limits =portfolio_sector_exposures_limits, portfolio_factor_exposure_dict = portfolio_factor_exposure_dict,
+                                     portfolio_factor_exposures_limits =portfolio_factor_exposures_limits, leverage_amt = leverage_amt, max_leverage=max_leverage  )
 
     problem = cp.Problem(objective, constraints)
     problem.solve()
@@ -144,13 +175,22 @@ class PortfolioConstruction:
     optimal_weights = weights.value.round(2).tolist()
     optimal_weights = dict(zip(list(all_data.keys()), optimal_weights))
 
-    optimal_port_data = calculate_portfolio_metrics(pd.Series(optimal_weights), expected_return_vector, covar_df, std_vector, all_data)
+    optimal_port_data = calculate_portfolio_metrics(pd.Series(optimal_weights), expected_return_vector, covar_df, std_vector, all_data,  one_year_return_df)
 
     return optimal_port_data
 
-  def optimize_ratio(self,ratio, hist_decay, portfolio_sector_exposures_limits = None):
+
+
+
+#------------------------------------ Optimize ratio [Sharpe and diversification ratio] #------------------------------------
+
+
+
+  def optimize_ratio(self,ratio, hist_decay, allow_short_sell = False, portfolio_sector_exposures_limits = None, portfolio_factor_exposures_limits = None):
 
     all_data = self.all_equity_data | self.all_etf_data
+    all_data = get_all_data_dict_for_usable_tickers(all_data)
+
     ratio = ratio.lower()
     allowed_ratios = ["sharpe ratio", "diversification ratio"]
 
@@ -159,18 +199,21 @@ class PortfolioConstruction:
 
     all_ticker_limits = get_clean_ticker_bounds_dict(all_data)
 
-    expected_return_vector,std_vector,covar_df,excess_return_vector = get_EWMA_std_return_cov(all_data, alpha = hist_decay, startDate = self.startDate, endDate = self.endDate)
+    expected_return_vector,std_vector,covar_df,excess_return_vector, expected_rf_rate, one_year_return_df = get_EWMA_std_return_cov(all_data, alpha = hist_decay, startDate = self.startDate, endDate = self.endDate)
 
     weights = cp.Variable(len(expected_return_vector))
-    portfolio_sector_exposures_dict = calculate_portfolio_sector_exposure(weights, all_data)
-    expected_return = calculate_portfolio_expected_return(weights, expected_return_vector)
-    portfolio_variance = calculate_portfolio_variance(weights, covar_df)
-    excess_return = calculate_portfolio_excess_return(weights, excess_return_vector)
+
+    factor_loadings = factor_model(all_data, all_factor_returns, alpha = hist_decay)
+    expected_return, portfolio_variance, excess_return, \
+    diversification_ratio, portfolio_sector_exposures_dict, \
+    portfolio_factor_exposure_dict = calculate_all(all_data, weights, expected_return_vector, excess_return_vector,covar_df, 
+                                                   factor_loadings )
 
 
     #### find min possible risk
     min_risk_objective = cp.Minimize(portfolio_variance)
-    constraints = create_constraints( weights, variance= portfolio_variance, expected_return = expected_return, ticker_limits = all_ticker_limits, strict_bound = True, portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits  )
+    constraints = create_constraints( weights,  variance= portfolio_variance, expected_return = expected_return, ticker_limits = all_ticker_limits, short_sell_allowed= allow_short_sell,
+                                     strict_bound = True, portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits, portfolio_factor_exposure_dict = portfolio_factor_exposure_dict, portfolio_factor_exposures_limits =portfolio_factor_exposures_limits    )
     problem = cp.Problem(min_risk_objective, constraints)
     problem.solve()
     if portfolio_variance.value is None:
@@ -179,7 +222,7 @@ class PortfolioConstruction:
 
     ### find max possible risk -- not DCP so cant solve for it directly
 
-    #1. find max possible return 
+    #1. find max possible return
     max_return_objective = cp.Maximize(expected_return)
     problem = cp.Problem(max_return_objective, constraints)
     problem.solve()
@@ -187,7 +230,8 @@ class PortfolioConstruction:
     print(max_possible_return)
     #2. find min variance to get that max possible return
     min_risk_objective = cp.Minimize(portfolio_variance)
-    constraints = create_constraints( weights, min_return = max_possible_return, ticker_limits = all_ticker_limits, variance= portfolio_variance, expected_return = expected_return, strict_bound = True, portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits  )
+    constraints = create_constraints( weights, min_return = max_possible_return, ticker_limits = all_ticker_limits, variance= portfolio_variance, expected_return = expected_return, strict_bound = True,short_sell_allowed= allow_short_sell,
+                                     portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits, portfolio_factor_exposure_dict = portfolio_factor_exposure_dict, portfolio_factor_exposures_limits =portfolio_factor_exposures_limits  )
 
     problem = cp.Problem(min_risk_objective, constraints)
     problem.solve()
@@ -203,10 +247,11 @@ class PortfolioConstruction:
       ##### get efficient frontier
       objective = cp.Maximize(excess_return)
 
-      best_ratio = 0      
-      for max_risk in np.linspace(min_possible_volatility,max_possible_volatility,80):
-        
-        constraints = create_constraints(weights, ticker_limits = all_ticker_limits, variance= portfolio_variance, expected_return = expected_return, strict_bound = True, max_variance =  max_risk**2, portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits  )
+      best_ratio = 0
+      for max_risk in np.linspace(min_possible_volatility,max_possible_volatility,200):
+
+        constraints = create_constraints(weights, ticker_limits = all_ticker_limits, variance= portfolio_variance, expected_return = expected_return, strict_bound = True, short_sell_allowed= allow_short_sell,
+                                         max_variance =  max_risk**2, portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits,portfolio_factor_exposure_dict = portfolio_factor_exposure_dict, portfolio_factor_exposures_limits =portfolio_factor_exposures_limits   )
         problem = cp.Problem(objective, constraints)
         problem.solve()
 
@@ -224,7 +269,7 @@ class PortfolioConstruction:
           optimization_plot["weights"].append(_weights)
           optimization_plot["sharpe"].append(sharpe_ratio)
 
-  
+
       max_sharpe_index = max(range(len(optimization_plot["sharpe"])), key=optimization_plot["sharpe"].__getitem__)
 
       best_sharpe_info_dict = {"weights":optimization_plot["weights"][max_sharpe_index],
@@ -241,40 +286,186 @@ class PortfolioConstruction:
     ######## diversification ratio ###########
 
     if ratio == "diversification ratio":
-      
+
       '''
-      logic explained -- 
+      logic explained --
       find min and max range of risk values possible for portfolio of n assets
       for each possible risk value
       maximize the weighted sum of asset risk (i.e risk assuming no correlation)
       calculate diversification ratio for each iteration
       the largest value would be the maximum possible diversification ratio for the portfolio of n assest.
       '''
-      
+
       objective = cp.Maximize(cp.sum(cp.multiply(weights, std_vector)))
 
       best_ratio = 0
 
       for possible_risk in np.linspace(min_possible_volatility,max_possible_volatility,250):
 
-        constraints = create_constraints(weights,ticker_limits = all_ticker_limits, variance= portfolio_variance, expected_return = expected_return, strict_bound = True, max_variance =  possible_risk**2, portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits  )
+        constraints = create_constraints(weights,ticker_limits = all_ticker_limits, variance= portfolio_variance, expected_return = expected_return, strict_bound = True, max_variance =  possible_risk**2, portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits, portfolio_factor_exposure_dict = portfolio_factor_exposure_dict, portfolio_factor_exposures_limits =portfolio_factor_exposures_limits   )
         problem = cp.Problem(objective, constraints)
         problem.solve()
-      
+
         if objective.value is not None:
           weight_array = weights.value.round(10).tolist()
           weight_array = dict(zip(list(all_data.keys()), weight_array))
-          portfolio_metrics = calculate_portfolio_metrics(pd.Series(weight_array), expected_return_vector, covar_df, std_vector, all_data)
+          portfolio_metrics = calculate_portfolio_metrics(pd.Series(weight_array), expected_return_vector, covar_df, std_vector, all_data,one_year_return_df)
           if portfolio_metrics["diversification ratio"]> best_ratio:
             best_ratio = portfolio_metrics["diversification ratio"]
             port_maximizing_diversification_ratio = portfolio_metrics
-      
+
       return port_maximizing_diversification_ratio
 
+
+
+#------------------------------------ Risk Parity and Budgeting #------------------------------------
+
+
+  def risk_parity(self, hist_decay = None, risk_budget:dict = None):
+    '''
+    risk budget would be a dict like {ticker: budget, ...}, the sum should not be 1 if all assets are given a budget
+    if >1 will be scaled to 1
+    if <1 and not all assets are given a budget, rest of budget will be distributed equaly among assets assuming
+    if <1 and all assets are given a budget, will be scaled to 1
+    '''
+
+
+
+    all_data = self.all_equity_data | self.all_etf_data
+    all_data = get_all_data_dict_for_usable_tickers(all_data)
+
+    expected_return_vector,std_vector,covar_df, excess_return_vector, expected_rf_rate, one_year_return_df = get_EWMA_std_return_cov(all_data, alpha =  hist_decay, startDate = self.startDate, endDate = self.endDate)
+    weights = cp.Variable(len(expected_return_vector))
+    expected_return = calculate_portfolio_expected_return(weights, expected_return_vector)
+
+    b = np.ones(len(expected_return_vector)) / len(expected_return_vector) #risk parity
+
+    if risk_budget is not None:
+      b = [risk_budget.get(asset,None) for asset in all_data]
+      sum_budget = sum([x for x in b if x is not None])
+
+      if sum_budget>=1:
+        b = [x/sum_budget if x is not None else 0 for x in b]
+
+      if sum_budget<1:
+        num_no_budget = b.count(None)
+        if num_no_budget>0:
+          b = [x if x is not None else (1-sum_budget)/num_no_budget for x in b ]
+        else: b = b/sum_budget
+
+    print(b)
+
+    # 0.5 var = b*log(weights)
+
+    objective = 0.5 * cp.quad_form(weights, covar_df.values) - cp.sum(cp.multiply(b, cp.log(weights)))
+
+    constr = [weights >= 0] # constraint
+    problem = cp.Problem(cp.Minimize(objective), constr)
+    problem.solve()
+
+    weights = weights/cp.sum(weights)
+
+    weight_array = weights.value.round(10).tolist()
+    weight_array = dict(zip(list(all_data.keys()), weight_array))
+    x = calculate_portfolio_metrics(pd.Series(weight_array), expected_return_vector, covar_df, std_vector, all_data, one_year_return_df)
+    print(x)
+
+    b_w = cp.multiply(weights, covar_df.values @ weights)
+
+    print(objective.value)
+
+
+
+
+#------------------------------------ CVaR Optimization #------------------------------------
+
+
+  def CVaR_Efficient_Frontier(self, beta=0.99, target_return = None, portfolio_sector_exposures_limits = None, portfolio_factor_exposures_limits = None):
+
+    '''
+    if target return is None it will generate the efficient frontier
+
+    '''
+
+    all_data = self.all_equity_data | self.all_etf_data
+    all_data = get_all_data_dict_for_usable_tickers(all_data)
+
+    all_ticker_limits = get_clean_ticker_bounds_dict(all_data)
+    expected_return_vector,std_vector,covar_df,excess_return_vector, expected_rf_rate, one_year_return_df = get_EWMA_std_return_cov(all_data, startDate = self.startDate, endDate = self.endDate)
+    weights = cp.Variable(len(expected_return_vector))
+
+
+    factor_loadings = factor_model(all_data, all_factor_returns)
+    expected_return, portfolio_variance, excess_return, \
+    diversification_ratio, portfolio_sector_exposures_dict, \
+    portfolio_factor_exposure_dict = calculate_all(all_data, weights, expected_return_vector, excess_return_vector,covar_df, 
+                                                   factor_loadings )
+
+
+    problem_constraints = create_constraints( weights, expected_return = expected_return, ticker_limits = all_ticker_limits, strict_bound = True, 
+                                             portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits, portfolio_factor_exposure_dict = portfolio_factor_exposure_dict, portfolio_factor_exposures_limits =portfolio_factor_exposures_limits    )
+
+    #### min possible return
+
+    min_return_objective = cp.Minimize(expected_return)
+    problem = cp.Problem(min_return_objective, problem_constraints)
+    problem.solve()
+    min_possible_return = expected_return.value
+
+    ### max possible return
+
+    max_return_objective = cp.Maximize(expected_return)
+    problem = cp.Problem(max_return_objective, problem_constraints)
+    problem.solve()
+    max_possible_return = expected_return.value
+
+    for return_i in np.linspace(min_possible_return, max_possible_return, 10):
+
+      hist_returns = one_year_return_df.copy()
+
+      problem_constraints = create_constraints( weights, expected_return = expected_return, ticker_limits = all_ticker_limits, strict_bound = True, 
+                                             portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits, portfolio_factor_exposure_dict = portfolio_factor_exposure_dict, portfolio_factor_exposures_limits =portfolio_factor_exposures_limits    )
+      weight_array = general_min_CVaR_problem(return_i,beta, expected_return, weights, problem_constraints, hist_returns, all_data )
       
+      portfolio_metrics = calculate_portfolio_metrics(pd.Series(weight_array), expected_return_vector, covar_df, std_vector, all_data,  hist_returns, CVaR_betas=[beta])
+      print(portfolio_metrics)
 
 
+
+
+  def min_CVaR(self, target_return, beta=0.99, portfolio_sector_exposures_limits = None, portfolio_factor_exposures_limits = None):
+
+    all_data = self.all_equity_data | self.all_etf_data
+    all_data = get_all_data_dict_for_usable_tickers(all_data)
+
+    all_ticker_limits = get_clean_ticker_bounds_dict(all_data)
+    print(all_ticker_limits)
+    expected_return_vector,std_vector,covar_df,excess_return_vector, expected_rf_rate, one_year_return_df = get_EWMA_std_return_cov(all_data, startDate = self.startDate, endDate = self.endDate)
+    weights = cp.Variable(len(expected_return_vector))
+
+
+    factor_loadings = factor_model(all_data, all_factor_returns)
+    expected_return, portfolio_variance, excess_return, \
+    diversification_ratio, portfolio_sector_exposures_dict, \
+    portfolio_factor_exposure_dict = calculate_all(all_data, weights, expected_return_vector, excess_return_vector,covar_df, 
+                                                   factor_loadings )
+
+    problem_constraints = create_constraints( weights, expected_return = expected_return, ticker_limits = all_ticker_limits, strict_bound = True, 
+                                             portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits, portfolio_factor_exposure_dict = portfolio_factor_exposure_dict, portfolio_factor_exposures_limits =portfolio_factor_exposures_limits    )
+
+
+    hist_returns = one_year_return_df.copy()
+
+    problem_constraints = create_constraints( weights, expected_return = expected_return, ticker_limits = all_ticker_limits, strict_bound = True, 
+                                            portfolio_sector_exposures_dict = portfolio_sector_exposures_dict, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits, portfolio_factor_exposure_dict = portfolio_factor_exposure_dict, portfolio_factor_exposures_limits =portfolio_factor_exposures_limits    )
+    weight_array = general_min_CVaR_problem(target_return, beta, expected_return, weights,problem_constraints, hist_returns, all_data )
     
+    portfolio_metrics = calculate_portfolio_metrics(pd.Series(weight_array), expected_return_vector, covar_df, std_vector, all_data,  hist_returns, CVaR_betas=[beta])
+
+    return portfolio_metrics
+
+
+#------------------------------------ Benchmark Methods #------------------------------------
 
   def benchmark_portfolios(self, model, hist_decay):
 
@@ -282,16 +473,17 @@ class PortfolioConstruction:
     no optimization needed here
     '''
     model = model.lower()
-    allowed_models = ["equal weight", "inverse volatility", "return weighted", 
+    allowed_models = ["equal weight", "inverse volatility", "return weighted",
                       "inverse variance"]
-      
+
     if model not in allowed_models:
       raise Exception(f"error, model must be one of {allowed_models}, not {model}")
 
 
     all_data = self.all_equity_data | self.all_etf_data
+    all_data = get_all_data_dict_for_usable_tickers(all_data)
 
-    expected_return_vector,std_vector,covar_df, excess_return_vector = get_EWMA_std_return_cov(all_data, alpha =  hist_decay, startDate = self.startDate, endDate = self.endDate)
+    expected_return_vector,std_vector,covar_df, excess_return_vector , expected_rf_rate, one_year_return_df = get_EWMA_std_return_cov(all_data, alpha =  hist_decay, startDate = self.startDate, endDate = self.endDate)
 
     if model =="equal weight":
       weight_array = expected_return_vector*0+1
@@ -308,14 +500,54 @@ class PortfolioConstruction:
       inv_var = 1/ std_vector**0.5
       weight_array = inv_var / np.sum(inv_var)
 
-    calculate_portfolio_metrics(weight_array, expected_return_vector, covar_df, std_vector, all_data)
+    calculate_portfolio_metrics(weight_array, expected_return_vector, covar_df, std_vector, all_data,  one_year_return_df)
     return weight_array
 
 
-def calculate_portfolio_metrics(weights,expected_returns, covar, std_vector, all_data):
+#------------------------------------ END OF CLASS METHODS #------------------------------------
+
+
+
+
+#------------------------------------ Supporting Functions Begin #------------------------------------
+
+
+def general_min_CVaR_problem(target_return, beta, expected_return_var, weights_var,problem_constraints, hist_returns, all_data ):
+
+  z = cp.Variable(len(hist_returns))
+  var = cp.Variable(1) ### variable to mimic the VaR of the portfolio for a given beta confidence
+  cvar = var + 1.0 / (len(hist_returns) * (1 - beta)) * cp.sum(z)
+  objective = cp.Minimize(cvar)
+
+  problem_constraints +=[expected_return_var>= target_return]
+
+  ### cvar related constraints:
+  problem_constraints += [z+ hist_returns.values @ weights_var + var >=0, z>=0]
+  problem = cp.Problem(objective, problem_constraints)
+  problem.solve()
+
+
+
+  if objective.value is not None:
+    weight_array = weights_var.value.round(10).tolist()
+    weight_array = dict(zip(list(all_data.keys()), weight_array))
+    print(weight_array)
+    return weight_array
+  else:
+    return "Infeasible"
+
+
+
+
+
+#------------------------------------ function to calculate portfolio risk metrics #------------------------------------
+
+def calculate_portfolio_metrics(weights,expected_returns, covar, std_vector, all_data, one_year_return_df, CVaR_betas =[0.99] ):
+  all_data = get_all_data_dict_for_usable_tickers(all_data)
 
   portfolio_metrics = {}
-  portfolio_metrics["weights"] = weights.to_dict()
+  weights_dict = weights.to_dict()
+  portfolio_metrics["weights"] = weights_dict
 
   port_vol = np.matmul(np.matmul(weights.values, covar), np.transpose(weights.values))**0.5
   portfolio_metrics["volatility"] = round(port_vol,4)
@@ -326,28 +558,52 @@ def calculate_portfolio_metrics(weights,expected_returns, covar, std_vector, all
   diversification_ratio = np.dot(weights,std_vector ) / port_vol
   portfolio_metrics["diversification ratio"] = round(diversification_ratio,4)
 
-  ### sector exposures dict 
+  ### sector exposures dict
 
   sector_exposures_df = pd.concat([all_data[ticker]["sector_weights"] for ticker in all_data], axis =1)
   sector_exposures = {sec: round(np.matmul( sector_exposures_df.loc[sec].values , weights),3) for sec in sector_exposures_df.index.tolist()}
   portfolio_metrics["sector_exposures"] = sector_exposures
 
 
+  ### risk contribution breakdown
+
+  weightXcovar = np.matmul(weights.values, covar)
+  risk_contribution = (weightXcovar * weights.values)/port_vol
+  portfolio_metrics["risk contribution"] = risk_contribution
+  portfolio_metrics["risk contribution sum"] = np.sum(risk_contribution)
+
+
+  ### CVaR Calculation
+
+
+
+  for beta in CVaR_betas:
+    beta_hist_returns = one_year_return_df.copy()
+    for ticker in weights_dict:
+      beta_hist_returns[ticker] *= weights_dict.get(ticker, 0)
+
+    beta_hist_returns = beta_hist_returns.sum(axis =1)
+
+    # Drop the first 252 days
+    sorted_returns = beta_hist_returns.sort_values(ascending=False)
+    print(sorted_returns)
+
+    portfolio_metrics[f"{beta*100}% CVaR"] = sorted_returns[-1* int(len(sorted_returns)*(1-beta)):].mean()
+
   return portfolio_metrics
 
 
+#------------------------------------ Function to build Constraint vectors #------------------------------------
 
 
+def create_constraints(weights, strict_bound = False, variance = None, expected_return = None,portfolio_sector_exposures_dict = None, ticker_limits:dict ={}, portfolio_sector_exposures_limits:dict = None, max_variance = None, min_return =None, short_sell_allowed = False, max_leverage = 0, leverage_amt=None, portfolio_factor_exposure_dict = None, portfolio_factor_exposures_limits =None):
 
 
+  if strict_bound:  
+    constraints =[cp.sum(weights)==1+max_leverage]
+  else:  constraints = [cp.sum(weights)<=1+max_leverage]
 
-
-def create_constraints(weights, strict_bound = False, variance = None, expected_return = None,portfolio_sector_exposures_dict = None, ticker_limits:dict ={}, portfolio_sector_exposures_limits:dict = None, max_variance = None, min_return =None, short_sell_allowed = False, max_leverage = 0 ):
-
-  constraints = [] ### initialze
-
-  if strict_bound:  constraints += [cp.sum(weights)==1+max_leverage]
-  else:  constraints += [cp.sum(weights)<=1+max_leverage]
+  if leverage_amt is not None: constraints +=[leverage_amt>=0]
 
   if variance is not None and max_variance is not None:
     constraints += [variance <= max_variance]
@@ -363,6 +619,14 @@ def create_constraints(weights, strict_bound = False, variance = None, expected_
       if portfolio_sector_exposures_limits[sector].get("min", None) is not None:
         constraints += [portfolio_sector_exposures_dict[sector] >= portfolio_sector_exposures_limits[sector]["min"]]
 
+  if portfolio_factor_exposures_limits is not None and portfolio_factor_exposure_dict is not None:
+    for sector in portfolio_factor_exposures_limits:
+      if portfolio_factor_exposures_limits[sector].get("max", None) is not None:
+        constraints += [portfolio_factor_exposure_dict[sector] <= portfolio_factor_exposures_limits[sector]["max"]]
+
+      if portfolio_factor_exposures_limits[sector].get("min", None) is not None:
+        constraints += [portfolio_factor_exposure_dict[sector] >= portfolio_factor_exposures_limits[sector]["min"]]
+
   if ticker_limits is not None:
     for index, (ticker, value) in enumerate(ticker_limits.items()):
       if ticker_limits[ticker].get("max", None) is not None:
@@ -377,15 +641,41 @@ def create_constraints(weights, strict_bound = False, variance = None, expected_
 
 
 
+#------------------------------------ Function to calculate Factor Exposures #------------------------------------
 
 
+def factor_model(all_data, factor_data, alpha = None):
 
-def factor_model(all_data, factor_data):
+  '''
+  gets factor loading of assets to factors (i.e regression betas)
+  '''
 
-  pass
+  tickers_lst = [i for i in all_data]
+
+  f_loadings_lst = []
+
+  if alpha is None: alpha =default_alpha
+
+  for ticker in tickers_lst:
+
+    ticker_returns = all_data[ticker]["price_data"].pct_change().dropna()
+
+    style_factors = all_factor_returns[[style_factor for style_factor in  factors_dict['style']]]
+    factors_df = pd.concat([i for i in [ticker_returns, style_factors] if len(i)!=2], axis = 1).dropna()
+    weights = (1-alpha) ** np.arange(len(factors_df))[::-1]
+
+    model = sm.WLS(factors_df[ticker], sm.add_constant(factors_df.drop(columns = ticker)), weights = weights).fit()
+    f_loadings_lst.append(model.params.rename(ticker))
+
+  factor_loadings = pd.concat(f_loadings_lst, axis = 1).fillna(0)
+  print(factor_loadings)
+
+  return factor_loadings
 
 
+def get_all_data_dict_for_usable_tickers(all_data):
 
+  return {key: value for key, value in all_data.items() if value.get('include')}
 
 
 
@@ -416,9 +706,17 @@ def get_EWMA_std_return_cov(all_data, factor_model = False, alpha = None, startD
   if endDate is not None:all_prices = all_prices[all_prices.index<= endDate]
 
 
-  all_returns = all_prices.pct_change().dropna(axis = 0, how = "all")
+  one_year_return_df = all_prices.copy()
+  for stock in all_prices.columns:
+    price_252_days_ago = one_year_return_df[stock].shift(252)
+    one_year_return_df[stock] = (one_year_return_df[stock] / price_252_days_ago) - 1
+  one_year_return_df = one_year_return_df.dropna()
 
-  ###### 
+
+  all_returns = all_prices.pct_change().dropna(axis = 0, how = "all")
+  #all_returns["AAPL"] = all_returns["AAPL"]*-1
+
+  ######
 
   df_excess_ret = all_returns.join(risk_free_data, how='left')
 
@@ -428,21 +726,27 @@ def get_EWMA_std_return_cov(all_data, factor_model = False, alpha = None, startD
   # Calculate excess returns
   for col in tickers_lst: df_excess_ret[col] = df_excess_ret[col] - df_excess_ret['RF']
 
-  if alpha is None: alpha =0.000000000000001
+  if alpha is None: alpha =default_alpha
   expw_returns = all_returns.ewm(alpha =alpha)
   excess_returns = df_excess_ret.drop(columns="RF").ewm(alpha =alpha)
   excess_return_vector = excess_returns.mean().iloc[-1].transpose() *frequency_scaler
   expected_return_vector = expw_returns.mean().iloc[-1].transpose() *frequency_scaler
   std_vector = expw_returns.std().iloc[-1].transpose() *np.sqrt(frequency_scaler)
+  expected_rf_rate = df_excess_ret[["RF"]].ewm(alpha =alpha).mean().iloc[-1].transpose().loc["RF"] *frequency_scaler
+
+  print(expected_rf_rate)
 
   covar, corr = cov_corr_calculator(all_returns, alpha)
 
-  return expected_return_vector,std_vector,covar, excess_return_vector
+  return expected_return_vector,std_vector,covar, excess_return_vector, expected_rf_rate, one_year_return_df
 
 
-def calculate_portfolio_excess_return(weights, excess_return_vector): return cp.sum(cp.multiply(weights, excess_return_vector))
-def calculate_portfolio_expected_return(weights, expected_return_vector): return cp.sum(cp.multiply(weights, expected_return_vector))
-def calculate_portfolio_variance(weights, covar_df): return cp.quad_form(weights, covar_df.values)
+def calculate_portfolio_excess_return(weights, excess_return_vector, leverage_amt = 0, expected_rf_rate = 0): 
+  return cp.sum(cp.multiply(weights, excess_return_vector))  - leverage_amt * expected_rf_rate
+def calculate_portfolio_expected_return(weights, expected_return_vector, leverage_amt = 0, expected_rf_rate = 0): 
+  return cp.sum(cp.multiply(weights, expected_return_vector)) - leverage_amt * expected_rf_rate
+def calculate_portfolio_variance(weights, covar_df):   return cp.quad_form(weights, covar_df.values) 
+ 
 
 def calculate_portfolio_diversification_ratio(weights, covar_df):
     portfolio_variance = calculate_portfolio_variance(weights, covar_df)
@@ -457,6 +761,23 @@ def calculate_portfolio_sector_exposure(weights, all_data):
     sector_exposures_df = pd.concat([all_data[ticker]["sector_weights"] for ticker in all_data], axis =1)
     portfolio_sector_exposures_dict = {sec: cp.matmul( sector_exposures_df.loc[sec].values , weights) for sec in sector_exposures_df.index.tolist()}
     return portfolio_sector_exposures_dict
+
+def calculate_portfolio_factor_exposure(weights, factor_loadings):
+    portfolio_factor_exposures_dict = {factor: cp.matmul( factor_loadings.loc[factor].values , weights) for factor in factor_loadings.index.tolist()}
+    return portfolio_factor_exposures_dict
+
+
+
+def calculate_all(all_data, weights, expected_return_vector, exccess_return_vector,covar_df, factor_loadings,leverage_amt = 0, expected_rf_rate = 0 ):
+  portfolio_variance = calculate_portfolio_variance(weights, covar_df)
+  portfolio_excess_return = calculate_portfolio_excess_return(weights, exccess_return_vector, leverage_amt,expected_rf_rate )
+  portfolio_expected_return = calculate_portfolio_expected_return(weights, expected_return_vector, leverage_amt,expected_rf_rate )
+  diversification_ratio = calculate_portfolio_diversification_ratio(weights, covar_df)
+  portfolio_sector_exposures_dict = calculate_portfolio_sector_exposure(weights, all_data)
+  portfolio_factor_exposures_dict = calculate_portfolio_factor_exposure(weights, factor_loadings)
+  return portfolio_expected_return, portfolio_variance, portfolio_excess_return,diversification_ratio, portfolio_sector_exposures_dict, portfolio_factor_exposures_dict
+
+
 
 
 
@@ -478,7 +799,7 @@ def download_stock_historical_price(ticker):
 def get_basic_ticker_data(ticker, ticker_config, source_test = "yahoo"):
 
     current_date = datetime.datetime.now()
-    start_date = current_date - datetime.timedelta(days=30 * 365)  
+    start_date = current_date - datetime.timedelta(days=30 * 365)
 
     ticker_data = {}
     if source_test == "yahoo":
@@ -523,7 +844,7 @@ def get_ticker_info(ticker, test_source = "yahoo"):
       yf_ticker = yf.Ticker(ticker)
       info = yf_ticker.info
       info = filter_dict(info, relevant_info)
-    
+
     else:
       relevant_info = ["MarketCapitalization", "Sector", "Country", "Currency"]
       url = f'https://www.alphavantage.co/query?function=OVERVIEW&symbol={ticker}&apikey={api_key}'
