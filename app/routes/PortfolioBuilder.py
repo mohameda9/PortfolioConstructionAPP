@@ -10,6 +10,7 @@ from io import StringIO, BytesIO
 
 
 
+
 #### global instance of model -- APIs will update
 model = PortfolioConstruction()
 
@@ -37,7 +38,6 @@ class inputModelPeriod(BaseModel):
 
 router = APIRouter()
 
-
 #### update model lookback period (i.e start and end date)
 
 @router.post("/update-model-date-settings")
@@ -48,11 +48,13 @@ async def update_model_periods(inputModelPeriod: inputModelPeriod):
 
 @router.post("/upload-price-data")
 async def upload_price_datasets(file: UploadFile = File(...)):
-    contents = file.file.read()
-    buffer = BytesIO(contents)
-    df = pd.read_csv(buffer)
-    print(df)
+    # contents = file.file.read()
+    # buffer = BytesIO(contents)
+    # df = pd.read_csv(buffer)
+    # print(df)
+    df = pd.read_csv(file.file)
     model.add_tickers_using_dataset(df)
+    return df.head()
 
 
 @router.post("/update-tickers-configs")
@@ -74,6 +76,14 @@ async def MVOpt(optimize_for, moreModelConstraints:moreModelConstraints, min_ret
               max_risk=max_risk, hist_decay=hist_decay, portfolio_sector_exposures_limits =portfolio_sector_exposures_limits)
     
     return optimized_port
+
+
+@router.post("/RiskParity") 
+async def MVOpt(hist_decay:float = None):
+    optimized_port = model.risk_parity(hist_decay=hist_decay)
+    
+    return optimized_port
+
 
 
 
@@ -98,9 +108,13 @@ async def min_CVaR(min_return:float, beta:float, moreModelConstraints:moreModelC
 
 
 @router.get("/test")
-async def test(filename):
+async def test():
+    print("working")
     return {"1"}
 
+@router.post("/test_post")
+async def test_post(min_return:float, beta:float, moreModelConstraints:moreModelConstraints):
+    return {"Msg": "Yay!"}
 
 
 

@@ -30,6 +30,7 @@ all_factor_returns
 default_alpha = 0.000000000000001
 
 #------------------------------ Class Construction Begins -----------------------------------
+#------------------------------ Class Construction Begins -----------------------------------
 class PortfolioConstruction:
 
   def __init__(self):
@@ -367,13 +368,12 @@ class PortfolioConstruction:
 
     weight_array = weights.value.round(10).tolist()
     weight_array = dict(zip(list(all_data.keys()), weight_array))
-    x = calculate_portfolio_metrics(pd.Series(weight_array), expected_return_vector, covar_df, std_vector, all_data, one_year_return_df)
+    risk_parity_portfolio = calculate_portfolio_metrics(pd.Series(weight_array), expected_return_vector, covar_df, std_vector, all_data, one_year_return_df)
     print(x)
 
     b_w = cp.multiply(weights, covar_df.values @ weights)
 
-    print(objective.value)
-
+    return risk_parity_portfolio
 
 
 
@@ -433,7 +433,7 @@ class PortfolioConstruction:
 
 
 
-  def min_CVaR(self, target_return, beta=0.99, portfolio_sector_exposures_limits = None, portfolio_factor_exposures_limits = None):
+  def min_CVaR(self, target_return, beta=0.95, portfolio_sector_exposures_limits = None, portfolio_factor_exposures_limits = None):
 
     all_data = self.all_equity_data | self.all_etf_data
     all_data = get_all_data_dict_for_usable_tickers(all_data)
@@ -542,7 +542,7 @@ def general_min_CVaR_problem(target_return, beta, expected_return_var, weights_v
 
 #------------------------------------ function to calculate portfolio risk metrics #------------------------------------
 
-def calculate_portfolio_metrics(weights,expected_returns, covar, std_vector, all_data, one_year_return_df, CVaR_betas =[0.99] ):
+def calculate_portfolio_metrics(weights,expected_returns, covar, std_vector, all_data, one_year_return_df, CVaR_betas =[0.95] ):
   all_data = get_all_data_dict_for_usable_tickers(all_data)
 
   portfolio_metrics = {}
@@ -613,26 +613,26 @@ def create_constraints(weights, strict_bound = False, variance = None, expected_
 
   if portfolio_sector_exposures_limits is not None and portfolio_sector_exposures_dict is not None:
     for sector in portfolio_sector_exposures_limits:
-      if portfolio_sector_exposures_limits[sector].get("max", None) is not None:
-        constraints += [portfolio_sector_exposures_dict[sector] <= portfolio_sector_exposures_limits[sector]["max"]]
+      if portfolio_sector_exposures_limits[sector].get("maxWeight", None) is not None:
+        constraints += [portfolio_sector_exposures_dict[sector] <= portfolio_sector_exposures_limits[sector]["maxWeight"]]
 
-      if portfolio_sector_exposures_limits[sector].get("min", None) is not None:
-        constraints += [portfolio_sector_exposures_dict[sector] >= portfolio_sector_exposures_limits[sector]["min"]]
+      if portfolio_sector_exposures_limits[sector].get("minWeight", None) is not None:
+        constraints += [portfolio_sector_exposures_dict[sector] >= portfolio_sector_exposures_limits[sector]["minWeight"]]
 
   if portfolio_factor_exposures_limits is not None and portfolio_factor_exposure_dict is not None:
     for sector in portfolio_factor_exposures_limits:
-      if portfolio_factor_exposures_limits[sector].get("max", None) is not None:
-        constraints += [portfolio_factor_exposure_dict[sector] <= portfolio_factor_exposures_limits[sector]["max"]]
+      if portfolio_factor_exposures_limits[sector].get("maxWeight", None) is not None:
+        constraints += [portfolio_factor_exposure_dict[sector] <= portfolio_factor_exposures_limits[sector]["maxWeight"]]
 
-      if portfolio_factor_exposures_limits[sector].get("min", None) is not None:
-        constraints += [portfolio_factor_exposure_dict[sector] >= portfolio_factor_exposures_limits[sector]["min"]]
+      if portfolio_factor_exposures_limits[sector].get("minWeight", None) is not None:
+        constraints += [portfolio_factor_exposure_dict[sector] >= portfolio_factor_exposures_limits[sector]["minWeight"]]
 
   if ticker_limits is not None:
     for index, (ticker, value) in enumerate(ticker_limits.items()):
-      if ticker_limits[ticker].get("max", None) is not None:
-        constraints += [weights[index] <= ticker_limits[ticker]["max"]]
-      if ticker_limits[ticker].get("min", None) is not None:
-        constraints += [weights[index] >= ticker_limits[ticker]["min"]]
+      if ticker_limits[ticker].get("maxWeight", None) is not None:
+        constraints += [weights[index] <= ticker_limits[ticker]["maxWeight"]]
+      if ticker_limits[ticker].get("minWeight", None) is not None:
+        constraints += [weights[index] >= ticker_limits[ticker]["minWeight"]]
 
   if not short_sell_allowed:
     constraints += [weights>=0]
@@ -809,8 +809,8 @@ def get_basic_ticker_data(ticker, ticker_config, source_test = "yahoo"):
 
     ticker_data["price_data"] = price_data
 
-    ticker_data["max"] = ticker_config.get("max",None)
-    ticker_data["min"] = ticker_config.get("min",None)
+    ticker_data["maxWeight"] = ticker_config.get("maxWeight",None)
+    ticker_data["minWeight"] = ticker_config.get("minWeight",None)
 
     return ticker_data
 
