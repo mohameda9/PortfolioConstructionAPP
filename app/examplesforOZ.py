@@ -18,3 +18,15 @@ exampleinputTickersSetupConfigs = {
 moreModelConstraints_example = {
     "sector_configs": {"Technology":{"maxWeight":0.5}}
 } 
+
+data ={ "data": {
+    "data": [
+      {"columns": ["Date", "AAPL", "WMT"]},
+      {"columns": ["2023-01-01", "50", "20"]},
+      {"columns": ["2023-01-02", "51", "23"]},
+      {"columns": ["2023-01-03", "52", "22"]},
+      {"columns": ["2023-01-04", "53", "27"]}
+     
+    ]
+  }
+}
