@@ -4,12 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
-origins = [
-    "http://localhost:8080",
-    "http://localhost:3000",
-    "http://localhost:3000/"
-]
-print(origins)
+origins = ["http://localhost:8080", "http://localhost:3000", "http://localhost:3000/"]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -19,6 +15,3 @@ app.add_middleware(
 )
 
 app.include_router(PortfolioBuilder.router)
-
-# TODO: save model to db and make it reusable (app.post("/training-environment")).
-# TODO:
