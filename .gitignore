@@ -1,0 +1,4 @@
+# Ignore virtual environment directories
+portfolio-builder/
+.portfolio-builder/
+portfolio-builder/
